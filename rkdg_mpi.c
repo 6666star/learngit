@@ -3,8 +3,9 @@
 #include<mpi.h>
 #include<time.h>
 #include<string.h>
+#include <stdlib.h>
 
-#define Nx 800
+#define Nx 100
 #define k  2
 #define dimPK (k+1)
 #define NumGLP 5 
@@ -14,52 +15,34 @@
 typedef struct 
 {
    // ===== 基函数相关（get_basis） =====
-   double phig[NumGLP][dimPK];         // 插值基函数在GL点的值
-   double phixg[NumGLP][dimPK];        // 插值基函数在GL点的导数
-   double phigr[dimPK];                // 右端点基函数 
-   double phigl[dimPK];                // 左端点基函数
-   double mm[dimPK];                   // 质量矩阵
+   double phig[NumGLP][dimPK];         
+   double phixg[NumGLP][dimPK];        
+   double phigr[dimPK];                
+   double phigl[dimPK];                
+   double mm[dimPK];                   
 
    // ===== Gauss-Lobatto 点（get_GLP） =====
-   double lambda[NumGLP];              // GL点坐标
-   double weight[NumGLP];              // 积分权重
+   double lambda[NumGLP];              
+   double weight[NumGLP];              
 
    // ===== 初值与边界条件（init_data） =====
-   double bcL, bcR;                    // 边界条件
-   double hx, hx1, xa, xb, tend;       // 网格尺寸与区间信息
-   double ureal[Nx][NumGLP];           // 精确解（用于误差分析）
-   double xc[Nx];                      // 单元中心点坐标
-
-   // ===== L2 投影（L2Pro） =====
-   double uh[Nx][dimPK];               // 有限元解的系数
+   double bcL, bcR;                    
+   double hx, hx1, xa, xb, tend;       
+   double xc[Nx];                      
 
    // ===== 时间推进（RK3） =====
-   double dt, t;                       // 时间步长、当前时间
-   double uh1[Nx][dimPK];              // RK stage 1
-   double du2[Nx][dimPK];              // RK stage 2
-   double uh2[Nx][dimPK];              // RK stage 3
-   double du[Nx][dimPK];               // 通用中间变量
-
-   // ===== 数值通量与限制器（Lh 模块） =====
-   double uhb[Nx+2][dimPK];            // 带 ghost cell 的 uh
-   double uhG[Nx][NumGLP];             // uh 在 GL 点的值
-   double flat[Nx+1][2];               // 限制器指标
-   double uhR[Nx+1][1];                // 单元右端值
-   double uhL[Nx+1][1];                // 单元左端值
-   double uR, uL, alpha;               // Riemann 解相关参数
-   double test[Nx][dimPK];             // 调试变量（建议后期删除）
+   double dt, t;                       
+   double alpha;                       
 
 } global_params;
 
-// 使用static避免栈溢出
 static global_params params;
 
-static inline double func(double u) {  // 内联函数提高性能
+static inline double func(double u) {  
     return u;  
 }
 
 void get_GLP() {
-    // 使用常量数组初始化，避免重复计算
     if (NumGLP == 5) {
         static const double lambda_vals[5] = {
             -0.9061798459386639927976269,
@@ -84,7 +67,6 @@ void get_GLP() {
 
 void get_basis() {
     if(k == 2) {
-        // 预计算常数，避免重复计算
         const double inv_hx1 = 1.0 / params.hx1;
         const double two_inv_hx1 = 2.0 * inv_hx1;
         
@@ -101,7 +83,6 @@ void get_basis() {
             params.phixg[i][2] = two_inv_hx1 * lambda_i;
         }
 
-        // 去掉多余的数组维度
         params.phigr[0] = 1.0;
         params.phigr[1] = 1.0;
         params.phigr[2] = 2.0/3.0;
@@ -113,221 +94,157 @@ void get_basis() {
         params.mm[0] = 1.0;
         params.mm[1] = 1.0/3.0;
         params.mm[2] = 4.0/45.0;
+
+
     }
 }
 
-void init_data(int idx, int N) {
-    // 只初始化需要的数组部分，而不是全部清零
-    for (int i = idx; i < idx + N; i++) {
-        for (int j = 0; j < NumGLP; j++) {
-            params.ureal[i][j] = 0.0;
-        }
-    }
-    
+void init_data_local(int idx, int N, double* ureal_local, double* uh_local) {
     params.xa = 0.0;
     params.xb = 2.0 * pi;
     params.bcL = 1.0;
     params.bcR = 1.0;
     params.tend = 2.0 * pi;
     params.hx = (params.xb - params.xa) / Nx;
-    params.hx1 = params.hx * 0.5;  // 乘法比除法快
+    params.hx1 = params.hx * 0.5;
 
+    // 只计算本地网格中心点
     for(int i = 0; i < N; i++) {
-        params.xc[idx + i] = params.xa + (idx + i + 0.5) * params.hx;  // 优化计算
+        params.xc[idx + i] = params.xa + (idx + i + 0.5) * params.hx;
     }
 
+    // 计算本地精确解
     for(int i = 0; i < N; i++) {
         double x_center = params.xc[idx + i];
         for(int j = 0; j < NumGLP; j++) {
-            params.ureal[idx + i][j] = sin(x_center + params.hx1 * params.lambda[j]);
+            ureal_local[i * NumGLP + j] = sin(x_center + params.hx1 * params.lambda[j]);
         }
     }
 }
 
-void L2pro(int idx, int N) {
-    // 只清零需要的部分
-    for(int i = idx; i < idx + N; i++) {
-        for(int j = 0; j < dimPK; j++) {
-            params.uh[i][j] = 0.0;
-        }
-    }
+void L2pro_local(int N, double* ureal_local, double* uh_local) {
+    // 初始化本地uh
+    memset(uh_local, 0, N * dimPK * sizeof(double));
     
-    // 优化循环顺序和减少数组访问
     for(int i = 0; i < N; i++) {
-        int global_i = idx + i;
         for(int j = 0; j < dimPK; j++) {
             double sum = 0.0;
-            double mm_inv = 1.0 / params.mm[j];  // 预计算倒数
+            double mm_inv = 1.0 / params.mm[j];
             
             for(int s = 0; s < NumGLP; s++) {
-                sum += params.weight[s] * params.ureal[global_i][s] * params.phig[s][j];
+                sum += params.weight[s] * ureal_local[i * NumGLP + s] * params.phig[s][j];
             }
-            params.uh[global_i][j] = 0.5 * sum * mm_inv;
+            uh_local[i * dimPK + j] = 0.5 * sum * mm_inv;
         }
     }
 }
 
-void output() {
-    FILE *fp;
-    int i, j;
+// 优化的Lh函数，只处理本地数据
+void Lh_local(double* uh_local, double* du_local, int N, int rank, int size,
+              double* left_boundary, double* right_boundary) {
+    
+    // 初始化du_local
+    memset(du_local, 0, N * dimPK * sizeof(double));
+    
+    // 设置ghost cells - 使用传入的边界数据
+    double uhb[N+2][dimPK];
+    
+    // 左边界
+    for(int j = 0; j < dimPK; j++) {
+        uhb[0][j] = left_boundary[j];
+    }
+    
+    // 本地数据
+    for(int i = 0; i < N; i++) {
+        for(int j = 0; j < dimPK; j++) {
+            uhb[i+1][j] = uh_local[i * dimPK + j];
+        }
+    }
+    
+    // 右边界
+    for(int j = 0; j < dimPK; j++) {
+        uhb[N+1][j] = right_boundary[j];
+    }
 
-    fp = fopen("DG_MPI_convection_solution.dat", "w");
-    if (fp == NULL) {
-        printf("Error opening file!\n");
-        return;
-    }
-
-    for (i = 0; i < Nx; i++) {
-        fprintf(fp, "%d ", i);
-        for (j = 0; j <NumGLP; j++) {
-            fprintf(fp, "%.15e ", params.uhG[i][j]);  // 使用科学计数法，减少精度
-        }
-        fprintf(fp, "\n");
-    }
-    fclose(fp);
-}
-
-// 改进后的Lh函数
-void Lh(double uhx[Nx][dimPK], double du1[Nx][dimPK], int idx, int N, int rank, int size) {
-    int i, j, s;
-    
-    // 初始化du1数组
-    for(i = 0; i < Nx; i++) {
-        for(j = 0; j < dimPK; j++) {
-            du1[i][j] = 0.0;
-        }
-    }
-    
-    // 局部数组定义
-    double local_uhG[N][NumGLP];
-    double local_uhR[N+1][1];
-    double local_uhL[N+1][1];
-    double local_flat[N+1][2];
-    
-    // 初始化局部数组
-    for(i = 0; i < N; i++) {
-        for(j = 0; j < NumGLP; j++) {
-            local_uhG[i][j] = 0.0;
-        }
-    }
-    
-    for(i = 0; i <= N; i++) {
-        local_uhR[i][0] = 0.0;
-        local_uhL[i][0] = 0.0;
-        local_flat[i][0] = 0.0;
-        local_flat[i][1] = 0.0;
-    }
-    
-    // 设置周期边界条件 - 需要MPI通信
-    double left_boundary[dimPK], right_boundary[dimPK];
-    
-    // 初始化边界数据
-    for(i = 0; i < dimPK; i++) {
-        left_boundary[i] = 0.0;
-        right_boundary[i] = 0.0;
-    }
-    
-    // 相邻进程间的通信
-    if(size > 1) {
-        // 向右发送，从左接收
-        int left_neighbor = (rank == 0) ? size - 1 : rank - 1;
-        int right_neighbor = (rank == size - 1) ? 0 : rank + 1;
-        
-        // 使用MPI_Sendrecv避免死锁
-        MPI_Sendrecv(uhx[idx+N-1], dimPK, MPI_DOUBLE, right_neighbor, 0,
-                     left_boundary, dimPK, MPI_DOUBLE, left_neighbor, 0,
-                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-                     
-        MPI_Sendrecv(uhx[idx], dimPK, MPI_DOUBLE, left_neighbor, 1,
-                     right_boundary, dimPK, MPI_DOUBLE, right_neighbor, 1,
-                     MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-    } else {
-        // 单进程情况，直接使用周期边界条件
-        for(i = 0; i < dimPK; i++) {
-            left_boundary[i] = uhx[Nx-1][i];
-            right_boundary[i] = uhx[0][i];
-        }
-    }
-    
-    // 设置ghost cells
-    for(i = 0; i < dimPK; i++) {
-        params.uhb[0][i] = left_boundary[i];
-        params.uhb[N+1][i] = right_boundary[i];
-    }
-    
-    // 设置本地数据
-    for(i = 0; i < N; i++) {
-        for(j = 0; j < dimPK; j++) {
-            params.uhb[i+1][j] = uhx[idx+i][j];
-        }
-    }
     
     // 计算在GL点的值
-    for(i = 0; i < N; i++) {
-        for(j = 0; j < NumGLP; j++) {
-            for(s = 0; s < dimPK; s++) {
-                local_uhG[i][j] += uhx[idx+i][s] * params.phig[j][s];
+    double uhG[N][NumGLP];
+    memset(uhG, 0, sizeof(uhG));
+    
+    for(int i = 0; i < N; i++) {
+        for(int j = 0; j < NumGLP; j++) {
+            for(int s = 0; s < dimPK; s++) {
+                uhG[i][j] += uh_local[i * dimPK + s] * params.phig[j][s];
             }
         }
     }
-    
+
+
     // 计算体积分项
-    for(i = 0; i < N; i++) {
-        for(j = 0; j < NumGLP; j++) {
-            for(s = 1; s < dimPK; s++) {
-                du1[idx+i][s] += 0.5 * params.weight[j] * func(local_uhG[i][j]) * params.phixg[j][s];
+    for(int i = 0; i < N; i++) {
+        for(int j = 0; j < NumGLP; j++) {
+            for(int s = 1; s < dimPK; s++) {
+                du_local[i * dimPK + s] += 0.5 * params.weight[j] * 
+                                          func(uhG[i][j]) * params.phixg[j][s];
             }
         }
     }
-    
+  
     // 计算边界上的左右值
-    for(i = 0; i <= N; i++) {
-        for(j = 0; j < dimPK; j++) {
-            local_uhR[i][0] += params.uhb[i][j] * params.phigr[j];
-            local_uhL[i][0] += params.uhb[i+1][j] * params.phigl[j];
+    double uhR[N+1], uhL[N+1];
+    memset(uhR, 0, sizeof(uhR));
+    memset(uhL, 0, sizeof(uhL));
+    
+    for(int i = 0; i <= N; i++) {
+        for(int j = 0; j < dimPK; j++) {
+            uhR[i] += uhb[i][j] * params.phigr[j];
+            uhL[i] += uhb[i+1][j] * params.phigl[j];
         }
     }
     
     // 计算数值通量
-    params.alpha = 1.0; // 设置Lax-Friedrichs参数
-    for(i = 0; i <= N; i++) {
-        params.uR = local_uhL[i][0];
-        params.uL = local_uhR[i][0];
-        local_flat[i][0] = 0.5 * (func(params.uR) + func(params.uL) - params.alpha * (params.uR - params.uL));
+    params.alpha = 1.0;
+    double flux[N+1];
+    for(int i = 0; i <= N; i++) {
+        double uR = uhL[i];
+        double uL = uhR[i];
+        flux[i] = 0.5 * (func(uR) + func(uL) - params.alpha * (uR - uL));
     }
     
-    // 计算边界积分项
-    for(i = 0; i < N; i++) {
-        for(j = 0; j < dimPK; j++) {
-            du1[idx+i][j] -= (1.0/params.hx) * 
-                (params.phigr[j] * local_flat[i+1][0] - params.phigl[j] * local_flat[i][0]);
+    // 计算边界积分项并除以质量矩阵
+    for(int i = 0; i < N; i++) {
+        for(int j = 0; j < dimPK; j++) {
+            du_local[i * dimPK + j] -= (1.0/params.hx) * 
+                (params.phigr[j] * flux[i+1] - params.phigl[j] * flux[i]);
+            du_local[i * dimPK + j] /= params.mm[j];
         }
     }
-    
-    // 除以质量矩阵
-    for(i = 0; i < N; i++) {
-        for(j = 0; j < dimPK; j++) {
-            du1[idx+i][j] /= params.mm[j];
-        }
-    }
+
 }
 
-// 改进后的RK3函数
-void RK3(int idx, int N, int rank, int size) {
-    int i, j;
+// 大幅优化的RK3函数
+void RK3_optimized(int N, int rank, int size, double* uh_local, double* ureal_local) {
     params.t = 0.0;
     int sum = 0;
     params.dt = CFL * params.hx;
     
-    // 初始化du2数组
-    for(i = 0; i < Nx; i++) {
-        for(j = 0; j < dimPK; j++) {
-            params.du2[i][j] = 0.0;
-        }
-    }
+    // 本地工作数组
+    double* uh1_local = malloc(N * dimPK * sizeof(double));
+    double* uh2_local = malloc(N * dimPK * sizeof(double));
+    double* du_local = malloc(N * dimPK * sizeof(double));
     
-  
+    // 边界通信缓冲区
+    double left_boundary[dimPK], right_boundary[dimPK];
+    
+    // 邻居进程ID
+    int left_neighbor = (rank == 0) ? size - 1 : rank - 1;
+    int right_neighbor = (rank == size - 1) ? 0 : rank + 1;
+    
+    // 创建持久通信请求
+    MPI_Request send_req[2], recv_req[2];
+    
     while (params.t < params.tend) {
+          // if(sum==1)break;
         if(params.t + params.dt >= params.tend) {
             params.dt = params.tend - params.t;
             params.t = params.tend;
@@ -341,105 +258,170 @@ void RK3(int idx, int N, int rank, int size) {
             printf("Running time is: %f\n", params.t);
         }
         
-        // RK3 第一步
-        Lh(params.uh, params.du2, idx, N, rank, size);
-        
-        // 同步所有进程的du2数据
-        MPI_Allgather(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, 
-                      params.du2, N * dimPK, MPI_DOUBLE, MPI_COMM_WORLD);
-        
-        for (i = 0; i < Nx; i++) {
-            for (j = 0; j < dimPK; j++) {
-                params.uh1[i][j] = params.uh[i][j] + params.dt * params.du2[i][j];
+        // RK3的三个stage
+        for(int stage = 0; stage < 3; stage++) {
+            double *current_uh = (stage == 0) ? uh_local : 
+                                ((stage == 1) ? uh1_local : uh2_local);
+            
+            // 非阻塞通信边界数据
+            if(size > 1) {
+                MPI_Irecv(left_boundary, dimPK, MPI_DOUBLE, left_neighbor, 0, 
+                         MPI_COMM_WORLD, &recv_req[0]);
+                MPI_Irecv(right_boundary, dimPK, MPI_DOUBLE, right_neighbor, 1, 
+                         MPI_COMM_WORLD, &recv_req[1]);
+                
+                MPI_Isend(&current_uh[(N-1) * dimPK], dimPK, MPI_DOUBLE, right_neighbor, 0, 
+                         MPI_COMM_WORLD, &send_req[0]);
+                MPI_Isend(current_uh, dimPK, MPI_DOUBLE, left_neighbor, 1, 
+                         MPI_COMM_WORLD, &send_req[1]);
+                
+                MPI_Waitall(2, recv_req, MPI_STATUSES_IGNORE);
+                MPI_Waitall(2, send_req, MPI_STATUSES_IGNORE);
+            } else {
+                // 单进程周期边界条件
+                memcpy(left_boundary, &current_uh[(N-1) * dimPK], dimPK * sizeof(double));
+                memcpy(right_boundary, current_uh, dimPK * sizeof(double));
             }
-        }
-        
-        // RK3 第二步
-        Lh(params.uh1, params.du2, idx, N, rank, size);
-        
-        // 同步所有进程的du2数据
-        MPI_Allgather(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, 
-                      params.du2, N * dimPK, MPI_DOUBLE, MPI_COMM_WORLD);
-        
-        for (i = 0; i < Nx; i++) {
-            for (j = 0; j < dimPK; j++) {
-                params.uh2[i][j] = (3.0/4.0) * params.uh[i][j] + (1.0/4.0) * params.uh1[i][j] + 
-                                   (1.0/4.0) * params.dt * params.du2[i][j];
-            }
-        }
-        
-        // RK3 第三步
-        Lh(params.uh2, params.du2, idx, N, rank, size);
-        
-        // 同步所有进程的du2数据
-        MPI_Allgather(MPI_IN_PLACE, 0, MPI_DATATYPE_NULL, 
-                      params.du2, N * dimPK, MPI_DOUBLE, MPI_COMM_WORLD);
-        
-        for (i = 0; i < Nx; i++) {
-            for (j = 0; j < dimPK; j++) {
-                params.uh[i][j] = (1.0/3.0) * params.uh[i][j] + (2.0/3.0) * params.uh2[i][j] + 
-                                  (2.0/3.0) * params.dt * params.du2[i][j];
-            }
-        }
+            
+            // 计算右端项
+            Lh_local(current_uh, du_local, N, rank, size, left_boundary, right_boundary);
+            
+            // RK更新
+            if(stage == 0) {
+                for(int i = 0; i < N * dimPK; i++) {
+                    uh1_local[i] = uh_local[i] + params.dt * du_local[i];
+                }
 
+            } else if(stage == 1) {
+                for(int i = 0; i < N * dimPK; i++) {
+                    uh2_local[i] = 0.75 * uh_local[i] + 0.25 * uh1_local[i] + 
+                                   0.25 * params.dt * du_local[i];
+                }
+            } else {
+                for(int i = 0; i < N * dimPK; i++) {
+                    uh_local[i] = (1.0/3.0) * uh_local[i] + (2.0/3.0) * uh2_local[i] + 
+                                  (2.0/3.0) * params.dt * du_local[i];
+                }
+
+//             for(int i = 0; i < N; i++) {
+//            //for(int j = 0; j < NumGLP; j++) {
+//            for(int s = 0; s < dimPK; s++) {
+//                 printf("%f  ",uh_local[i*dimPK+s]);
+//           // }
+//         }
+//            printf("rank is=%d\n",rank);
+//    }
+
+            }
+        }
     }
     
     if(rank == 0) {
         printf("Total time steps: %d\n", sum);
     }
+    
+    // 清理
+    free(uh1_local);
+    free(uh2_local);
+    free(du_local);
 }
 
-void Error()
-{
-    double uE[Nx][NumGLP];
-    double L2_Error = 0.0, L1_Error = 0.0, Linf_Error = 0.0;
-    int i, j, i1;
-
-    // 初始化
-    memset(uE, 0, sizeof(uE));
-    memset(params.uhG, 0, sizeof(params.uhG));
-
-    // Step 1: 将模态系数uh转换为Gauss点上的值uhG
-    for (i = 0; i < Nx; i++) {
-        for (i1 = 0; i1 < dimPK; i1++) {
-            for (j = 0; j < NumGLP; j++) {
-                params.uhG[i][j] += params.uh[i][i1] * params.phig[j][i1];
+void Error_parallel(int N, int rank, int size, double* uh_local, double* ureal_local) {
+    // 本地误差计算
+    double local_uhG[N * NumGLP];
+    double local_uE[N * NumGLP];
+    
+    // 将模态系数转换为GL点值
+    memset(local_uhG, 0, sizeof(local_uhG));
+    for(int i = 0; i < N; i++) {
+        for(int j = 0; j < NumGLP; j++) {
+            for(int s = 0; s < dimPK; s++) {
+                local_uhG[i * NumGLP + j] += uh_local[i * dimPK + s] * params.phig[j][s];
             }
         }
     }
-
-    // Step 2: 计算误差uE = |uhG - ureal|
-    for (i = 0; i < Nx; i++) {
-        for (j = 0; j < NumGLP; j++) {
-            uE[i][j] = fabs(params.uhG[i][j] - params.ureal[i][j]);
-        }
-    }
-
-    // Step 3: 计算L2误差和L1误差（加权积分）
-    for (i = 0; i < Nx; i++) {
-        for (j = 0; j < NumGLP; j++) {
+    
+    // 计算本地误差
+    double local_L2 = 0.0, local_L1 = 0.0, local_Linf = 0.0;
+    
+    for(int i = 0; i < N; i++) {
+        for(int j = 0; j < NumGLP; j++) {
+            int idx = i * NumGLP + j;
+            local_uE[idx] = fabs(local_uhG[idx] - ureal_local[idx]);
+            
             double weight = params.hx1 * params.weight[j];
-            L2_Error += weight * uE[i][j] * uE[i][j];
-            L1_Error += weight * uE[i][j];
-        }
-    }
-    L2_Error = sqrt(L2_Error);
-
-    // Step 4: 计算L∞误差（所有Gauss点的最大误差）
-    for (i = 0; i < Nx; i++) {
-        for (j = 0; j < NumGLP; j++) {
-            if (uE[i][j] > Linf_Error) {
-                Linf_Error = uE[i][j];
+            local_L2 += weight * local_uE[idx] * local_uE[idx];
+            local_L1 += weight * local_uE[idx];
+            
+            if(local_uE[idx] > local_Linf) {
+                local_Linf = local_uE[idx];
             }
         }
     }
-
-    // Step 5: 输出结果
-    printf("Final L2 error   = %.15f\n", L2_Error);
-    printf("Final L1 error   = %.15f\n", L1_Error);
-    printf("Final Linf error = %.15f\n", Linf_Error);
+    
+    // 全局归约
+    double global_L2, global_L1, global_Linf;
+    MPI_Reduce(&local_L2, &global_L2, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_L1, &global_L1, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&local_Linf, &global_Linf, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    
+    if(rank == 0) {
+        global_L2 = sqrt(global_L2);
+        printf("Final L2 error   = %.15f\n", global_L2);
+        printf("Final L1 error   = %.15f\n", global_L1);
+        printf("Final Linf error = %.15f\n", global_Linf);
+    }
 }
 
+void output_parallel(int N, int rank, int size, double* uh_local) {
+    if(rank == 0) {
+        FILE *fp = fopen("DG_MPI_convection_solution.dat", "w");
+        if (fp == NULL) {
+            printf("Error opening file!\n");
+            return;
+        }
+        
+        // 处理rank 0的数据
+        for(int i = 0; i < N; i++) {
+            fprintf(fp, "%d ", i);
+            double uhG[NumGLP] = {0};
+            for(int j = 0; j < NumGLP; j++) {
+                for(int s = 0; s < dimPK; s++) {
+                    uhG[j] += uh_local[i * dimPK + s] * params.phig[j][s];
+                }
+                fprintf(fp, "%.15e ", uhG[j]);
+            }
+            fprintf(fp, "\n");
+        }
+        
+        // 接收并处理其他进程的数据
+        for(int p = 1; p < size; p++) {
+            int recv_N = Nx / size;
+            if(p < (Nx % size)) recv_N++;
+            
+            double* recv_uh = malloc(recv_N * dimPK * sizeof(double));
+            MPI_Recv(recv_uh, recv_N * dimPK, MPI_DOUBLE, p, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+            
+            int start_idx = p * (Nx / size) + (p < (Nx % size) ? p : (Nx % size));
+            
+            for(int i = 0; i < recv_N; i++) {
+                fprintf(fp, "%d ", start_idx + i);
+                double uhG[NumGLP] = {0};
+                for(int j = 0; j < NumGLP; j++) {
+                    for(int s = 0; s < dimPK; s++) {
+                        uhG[j] += recv_uh[i * dimPK + s] * params.phig[j][s];
+                    }
+                    fprintf(fp, "%.15e ", uhG[j]);
+                }
+                fprintf(fp, "\n");
+            }
+            free(recv_uh);
+        }
+        fclose(fp);
+    } else {
+        MPI_Send(uh_local, N * dimPK, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
+    }
+}
 
 int main(int argc, char** argv) {
     MPI_Init(&argc, &argv);
@@ -449,49 +431,45 @@ int main(int argc, char** argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
+    // 负载均衡的网格分布
     int local_N = Nx / size;
     int remainder = Nx % size;
-
     if (rank < remainder) {
         local_N++; 
     }
     int start_idx = rank * (Nx / size) + (rank < remainder ? rank : remainder);
 
+    // 分配本地数组
+    double* uh_local = malloc(local_N * dimPK * sizeof(double));
+    double* ureal_local = malloc(local_N * NumGLP * sizeof(double));
+
+    // 初始化
     get_GLP();
-    init_data(start_idx, local_N);
+    init_data_local(start_idx, local_N, ureal_local, uh_local);
     get_basis();
-    L2pro(start_idx, local_N);
+    L2pro_local(local_N, ureal_local, uh_local);
     
-    // 传递必要的参数
-    RK3(start_idx, local_N, rank, size);
+    // 时间推进
+    RK3_optimized(local_N, rank, size, uh_local, ureal_local);
 
-       double t_end = MPI_Wtime();
+    double t_end = MPI_Wtime();
     double elapsed = t_end - t_start;
-
     
-    // 收集所有进程的结果到rank 0
-    if(rank == 0) {
-        // 收集其他进程的数据
-        for(int p = 1; p < size; p++) {
-            int recv_N = Nx / size;
-            if(p < remainder) recv_N++;
-            int recv_idx = p * (Nx / size) + (p < remainder ? p : remainder);
-            
-            MPI_Recv(&params.uh[recv_idx], recv_N * dimPK, MPI_DOUBLE, p, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            MPI_Recv(&params.ureal[recv_idx], recv_N * NumGLP, MPI_DOUBLE, p, 1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-        }
-        Error();
-        output();
-    } else {
-        // 发送数据到rank 0
-        MPI_Send(&params.uh[start_idx], local_N * dimPK, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
-        MPI_Send(&params.ureal[start_idx], local_N * NumGLP, MPI_DOUBLE, 0, 1, MPI_COMM_WORLD);
-    }
+    // 误差分析和输出
+    Error_parallel(local_N, rank, size, uh_local, ureal_local);
+    output_parallel(local_N, rank, size, uh_local);
     
+    // 输出性能信息
+    double max_elapsed;
+    MPI_Reduce(&elapsed, &max_elapsed, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     if(rank == 0) {
-        printf("Wall time elapsed: %.6f seconds\n", elapsed);
+        printf("Wall time elapsed: %.6f seconds\n", max_elapsed);
     }
 
+    // 清理
+    free(uh_local);
+    free(ureal_local);
+    
     MPI_Finalize();
     return 0;
 }
